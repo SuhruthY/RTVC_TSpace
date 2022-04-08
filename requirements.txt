@@ -18,3 +18,5 @@ webrtcvad-wheels
 pytorch-lightning
 optuna
 torchvision
+
+libsndfile1
