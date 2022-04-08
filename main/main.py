@@ -5,7 +5,10 @@ import os
 import random
 import argparse
 import numpy as np
+
+import umap
 import matplotlib.pyplot as plt
+from matplotlib import cm
 
 import librosa
 import librosa.display
@@ -38,6 +41,25 @@ MEL_N_CHANNELS = 40
 EM_SIZE = 256
 
 FIGSIZE = (21, 12)
+
+CMAP = np.array([
+    [76, 255, 0],
+    [0, 127, 70],
+    [255, 0, 0],
+    [255, 217, 38],
+    [0, 135, 255],
+    [165, 0, 165],
+    [255, 167, 255],
+    [0, 255, 255],
+    [255, 96, 38],
+    [142, 76, 0],
+    [33, 0, 127],
+    [0, 0, 0],
+    [183, 183, 183],
+], dtype=np.float) / 255
+
+MAX_SPKR = 10
+
 SUPER = {
     "size": 18,
     "weight": 600,
@@ -84,9 +106,6 @@ nplot = (int(np.ceil(nplot[0])), int(np.ceil(nplot[1])))
 # order = [(i, j) for i in range(nplot[0]) for j in  range(nplot[1])]
 
 epoch_idxs = list(range(args.epochs)) if args.epochs<10 else np.random.choice(list(range(1, args.epochs)), nchoice, False)
-
-# ------------------------------------------------------------------------
-
 #---------------------------------------------------------------
 class RandomCycler:
     def __init__(self, source):
@@ -239,7 +258,10 @@ class SpeakerEncoder(pl.LightningModule):
 
         self.data = {
             "metric/loss": [],
+            "metric/eer": [],
             "metric/val_loss": [],
+            "metric/val_eer": [],
+            "input/embeds": [],
         }
 
         # Network defition
@@ -315,27 +337,70 @@ class SpeakerEncoder(pl.LightningModule):
     def common_step_batch(self, batch, batch_idx, stage=None):
         inputs = torch.from_numpy(batch.data)        
 
-        if (self.current_epoch==0) and (istraining) and (batch_idx==1): 
-            if stage=="train":
-                mels = inputs[np.random.choice(range(1, len(inputs)), 16, False)]
+        embeds = self(inputs)
+        embeds_loss = embeds.view((args.speaker_per_batch, args.utterances_per_speaker, -1))
+
+        loss, eer = self.loss(embeds_loss)
+
+        if (istraining) and stage=="train":
+
+            if self.current_epoch in epoch_idxs: 
+                idx = np.random.randint(1, len(inputs))
+                height = int(np.sqrt(len(embeds[idx])))
+                shape = (height, -1)
+                self.data["input/embeds"].append(
+                    embeds[idx].reshape(shape).detach().numpy()
+                )
+                           
+            if (self.current_epoch==0) and (batch_idx==1):
+                idxs = np.random.choice(range(1, len(inputs)), 16, False)
 
                 self.logger.experiment.add_image(
                     "plots/inputs/mel_specs",
-                    SpeakerEncoder.input_to_image(mels,
+                    SpeakerEncoder.input_to_image(inputs[idxs],
                         "random Melody-Spectrogram pool",
                         "Time", "Mels"
                     ), 0, dataformats='NCHW'
                 )
 
-            self.logger.experiment.add_graph(SpeakerEncoder(), inputs)
+                self.logger.experiment.add_graph(SpeakerEncoder(), inputs)
 
-        embeds = self(inputs)
-        embeds_loss = embeds.view((args.speaker_per_batch, args.utterances_per_speaker, -1))
+                # plt.clf()
 
-        loss, eer = self.loss(embeds_loss)
-  
-        # self.logger.experiment.add_scalar(f"loss/{self.current_epoch}/{stage}", loss, batch_idx)
-        # self.logger.experiment.add_scalar(f"eer/{self.current_epoch}/{stage}", eer, batch_idx)
+                cur_embeds = embeds.detach().numpy()
+                cur_embeds = cur_embeds[:MAX_SPKR * args.utterances_per_speaker]
+
+                # print(cur_embeds.shape)
+
+                n_speakers = len(cur_embeds ) // args.utterances_per_speaker
+                ground_truth = np.repeat(np.arange(n_speakers), args.utterances_per_speaker)
+
+                
+
+
+                # print(ground_truth)
+
+                colors = [CMAP[i] for i in ground_truth]
+
+                reducer = umap.UMAP()
+                projected = reducer.fit_transform(cur_embeds)
+
+                self.logger.experiment.add_embedding(cur_embeds, ground_truth, self.current_epoch, "raw")
+
+                self.logger.experiment.add_embedding(projected, ground_truth, self.current_epoch, "notraw")
+
+                # print(projected.shape)
+
+                
+
+
+
+                # plt.scatter(projected[:, 0], projected[:, 1], c=colors)
+                # plt.gca().set_aspect("equal", "datalim")
+                
+                # plt.savefig("test.png")
+
+                # qcc
 
         return loss, eer
 
@@ -355,11 +420,14 @@ class SpeakerEncoder(pl.LightningModule):
 
     def training_epoch_end(self, outputs):
         loss = [x["loss"].detach().item() for x in outputs]
+        eer = [x["eer"] for x in outputs]
 
-        if self.current_epoch in epoch_idxs: self.data["metric/loss"].append(loss)
+        if self.current_epoch in epoch_idxs: 
+            self.data["metric/loss"].append(loss)
+            self.data["metric/eer"].append(eer)
 
         loss = np.mean(loss)
-        eer = np.mean([x["eer"] for x in outputs])
+        eer = np.mean(eer)
 
         self.metrics["loss"].append(loss)
         self.logger.experiment.add_scalar("AvgLoss/train", loss, self.current_epoch)
@@ -369,11 +437,14 @@ class SpeakerEncoder(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         loss = [x["val_loss"].detach().item() for x in outputs]
+        eer = [x["val_eer"] for x in outputs]
         
-        if self.current_epoch in epoch_idxs: self.data["metric/val_loss"].append(loss)
+        if self.current_epoch in epoch_idxs: 
+            self.data["metric/val_loss"].append(loss)
+            self.data["metric/val_eer"].append(loss)
 
         loss = np.mean(loss)
-        eer = np.mean([x["val_eer"] for x in outputs])
+        eer = np.mean(eer)
 
         self.metrics["val_loss"].append(loss)
         self.logger.experiment.add_scalar("AvgLoss/val", loss, self.current_epoch)
@@ -400,7 +471,6 @@ class SpeakerEncoder(pl.LightningModule):
                 cur_ax.plot(y)
 
                 if m+1 != nplot[0]: cur_ax.set_xticks([])
-                # if n!=0: cur_ax.set_yticks([])
             except: 
                 cur_ax.set_xticks([])
                 
@@ -435,7 +505,33 @@ class SpeakerEncoder(pl.LightningModule):
         return SpeakerEncoder.figure_to_image()
 
     @staticmethod
-    def add_labels(xlabel=None, ylabel=None, label_size=14, padx=5, pady=5):        
+    def embeds_to_image(data, title):
+        plt.clf()
+
+        fig, ax = plt.subplots(nplot[0], nplot[1], figsize=(nplot[0]*4, nplot[1]*4))
+        fig.add_subplot(111, frameon=False)
+        fig.suptitle(title, size=SUPER["size"], weight=SUPER["weight"])
+        count = 0
+        for m, n in [(i, j) for i in range(nplot[0]) for j in  range(nplot[1])]:
+
+            if (nplot[0] != 1) and (nplot[1] != 1): cur_ax = ax[m, n]
+            else: cur_ax = ax[count]
+
+            try:
+                cmap = cm.get_cmap()
+                cur_ax.imshow(data[count], cmap=cmap)
+            except: pass
+
+            cur_ax.set_xticks([])    
+            cur_ax.set_yticks([])
+
+            count += 1
+
+        plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
+        return SpeakerEncoder.figure_to_image()
+
+    @staticmethod
+    def add_labels(xlabel=None, ylabel=None, label_size=14, padx=5, pady=2):        
         plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
         plt.grid(False)
 
@@ -481,6 +577,16 @@ class SpeakerEncoderCallbacks(pl.Callback):
         )
 
         pl_module.logger.experiment.add_image(
+            "plots/metrics/eer", 
+            SpeakerEncoder.metric_to_image(
+                pl_module.data["metric/eer"], 
+                "Training EER by Step per Epoch",
+                "step (batch-number)",
+                "EER (Equal Error Rate)"
+            ), 0, dataformats='NCHW'
+        )
+
+        pl_module.logger.experiment.add_image(
             "plots/metrics/val_loss", 
             SpeakerEncoder.metric_to_image(
                 pl_module.data["metric/val_loss"], 
@@ -489,6 +595,26 @@ class SpeakerEncoderCallbacks(pl.Callback):
                 "val loss (GE2E loss)"
             ), 0, dataformats='NCHW'
         )
+
+        pl_module.logger.experiment.add_image(
+            "plots/metrics/val_eer", 
+            SpeakerEncoder.metric_to_image(
+                pl_module.data["metric/val_eer"], 
+                "Validation EER by Step per Epoch",
+                "step (batch-number)",
+                "EER (Equal Error Rate)"
+            ), 0, dataformats='NCHW'
+        )
+
+        if istraining:
+            pl_module.logger.experiment.add_image(
+                "plots/input/embeds", 
+                SpeakerEncoder.embeds_to_image(
+                    pl_module.data["input/embeds"], 
+                    "random Embeddings pool",
+                ), 0, dataformats='NCHW'
+            )
+
 
 if __name__=="__main__":
     warnings.filterwarnings("ignore")

@@ -19,4 +19,4 @@ pytorch-lightning
 optuna
 torchvision
 
-libsndfile1
+
