@@ -6,6 +6,8 @@ import random
 import argparse
 import numpy as np
 
+from typing import Union
+
 import umap
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -76,8 +78,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-frun", "--fast_run", "--fast", type=bool, default=False)
 parser.add_argument("-e", "--epochs", "--num_epochs", type=int, default=20)
 
-parser.add_argument("-tlim", "--per_train", "--train_limit", type=int, default=30)
-parser.add_argument("-vlim", "--per_val", "--val_limit", type=int, default=20)
+parser.add_argument("-tlim", "--per_train", "--train_limit",  default="30")
+parser.add_argument("-vlim", "--per_val", "--val_limit", default="20")
 
 parser.add_argument("-v", "--version_name", "--vname", default="default")
 
@@ -96,14 +98,15 @@ parser.add_argument("-dir", "--data_dir", "--directory",  type=dir_path, default
 
 args = parser.parse_args()
 
-istraining = not args.istuning
+args.per_train = int(args.per_train) if args.per_train.isdigit() else float(args.per_train)
+args.per_val = int(args.per_val) if args.per_val.isdigit() else float(args.per_val)
+
+istraining = not args.istuning 
 
 nchoice = args.epochs if args.epochs < 10 else (np.random.randint(args.epochs//5, args.epochs-5) if args.epochs <20 else 16)
 
 nplot = (2, 1) if nchoice==2 else ((nchoice/2, 2) if nchoice<7 else ((3, nchoice/3) if nchoice<10 else (4, nchoice/4)))
 nplot = (int(np.ceil(nplot[0])), int(np.ceil(nplot[1])))
-
-# order = [(i, j) for i in range(nplot[0]) for j in  range(nplot[1])]
 
 epoch_idxs = list(range(args.epochs)) if args.epochs<10 else np.random.choice(list(range(1, args.epochs)), nchoice, False)
 #---------------------------------------------------------------
@@ -262,7 +265,15 @@ class SpeakerEncoder(pl.LightningModule):
             "metric/val_loss": [],
             "metric/val_eer": [],
             "input/embeds": [],
+            
+            "input/proj": {
+                "vector": [],
+                "meta": "Speaker\n"
+            }
+
         }
+
+        self.meta = "labelc1\tlabelc2\tlabelc3\t\n"
 
         # Network defition
         self.lstm = nn.LSTM(
@@ -346,13 +357,24 @@ class SpeakerEncoder(pl.LightningModule):
 
             if self.current_epoch in epoch_idxs: 
                 idx = np.random.randint(1, len(inputs))
+
                 height = int(np.sqrt(len(embeds[idx])))
                 shape = (height, -1)
                 self.data["input/embeds"].append(
                     embeds[idx].reshape(shape).detach().numpy()
                 )
+
+                cur_embeds = embeds.detach()
+                cur_embeds = cur_embeds[:MAX_SPKR * args.utterances_per_speaker]
+
+                self.data["input/proj"]["vector"].append(cur_embeds)
+
+                n_speakers = len(cur_embeds ) // args.utterances_per_speaker
+                ground_truth = np.repeat(np.arange(n_speakers), args.utterances_per_speaker)
+
+                self.data["input/proj"]["meta"] += "/n".join([f"speaker{i}" for i in ground_truth])
                            
-            if (self.current_epoch==0) and (batch_idx==1):
+            if self.current_epoch==0:
                 idxs = np.random.choice(range(1, len(inputs)), 16, False)
 
                 self.logger.experiment.add_image(
@@ -364,43 +386,6 @@ class SpeakerEncoder(pl.LightningModule):
                 )
 
                 self.logger.experiment.add_graph(SpeakerEncoder(), inputs)
-
-                # plt.clf()
-
-                cur_embeds = embeds.detach().numpy()
-                cur_embeds = cur_embeds[:MAX_SPKR * args.utterances_per_speaker]
-
-                # print(cur_embeds.shape)
-
-                n_speakers = len(cur_embeds ) // args.utterances_per_speaker
-                ground_truth = np.repeat(np.arange(n_speakers), args.utterances_per_speaker)
-
-                
-
-
-                # print(ground_truth)
-
-                colors = [CMAP[i] for i in ground_truth]
-
-                reducer = umap.UMAP()
-                projected = reducer.fit_transform(cur_embeds)
-
-                self.logger.experiment.add_embedding(cur_embeds, ground_truth, self.current_epoch, "raw")
-
-                self.logger.experiment.add_embedding(projected, ground_truth, self.current_epoch, "notraw")
-
-                # print(projected.shape)
-
-                
-
-
-
-                # plt.scatter(projected[:, 0], projected[:, 1], c=colors)
-                # plt.gca().set_aspect("equal", "datalim")
-                
-                # plt.savefig("test.png")
-
-                # qcc
 
         return loss, eer
 
@@ -615,9 +600,16 @@ class SpeakerEncoderCallbacks(pl.Callback):
                 ), 0, dataformats='NCHW'
             )
 
+            pl_module.logger.experiment.add_embedding(
+                torch.stack(pl_module.data["input/proj"]["vector"]), 
+                metadata = pl_module.data["input/proj"]["meta"], 
+                tag = f"default"
+            )
+
 
 if __name__=="__main__":
     warnings.filterwarnings("ignore")
+
     ## -------------- TRAINING LOOP ------------------------
     datamodule = SpeakerVerificationDataModule(f"{args.data_dir}/train", f"{args.data_dir}/val")
 
