@@ -6,8 +6,6 @@ import random
 import argparse
 import numpy as np
 
-from typing import Union
-
 import umap
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -43,23 +41,6 @@ MEL_N_CHANNELS = 40
 EM_SIZE = 256
 
 FIGSIZE = (21, 12)
-
-CMAP = np.array([
-    [76, 255, 0],
-    [0, 127, 70],
-    [255, 0, 0],
-    [255, 217, 38],
-    [0, 135, 255],
-    [165, 0, 165],
-    [255, 167, 255],
-    [0, 255, 255],
-    [255, 96, 38],
-    [142, 76, 0],
-    [33, 0, 127],
-    [0, 0, 0],
-    [183, 183, 183],
-], dtype=np.float) / 255
-
 MAX_SPKR = 10
 
 SUPER = {
@@ -85,7 +66,9 @@ parser.add_argument("-v", "--version_name", "--vname", default="default")
 
 parser.add_argument("-nwrkr", "--num_workers", default=os.cpu_count())
 
-parser.add_argument("-tune", "--istuning", action='store_true')
+parser.add_argument("-tune", "--istuning", action="store_true")
+parser.add_argument("-check", "--check_model", action="store_true")
+parser.add_argument("-p", "--pruning", action="store_true")
 
 parser.add_argument("-lrate", "--learning_rate", default=1e-4)
 parser.add_argument("-nlayers", "--num_layers", default=3)
@@ -96,12 +79,20 @@ parser.add_argument("-nutter", "--utterances_per_speaker", "--utter_per_spkr", t
 
 parser.add_argument("-dir", "--data_dir", "--directory",  type=dir_path, default="../data/audio")
 
+parser.add_argument("-s", "--studyname", "--study", default="default")
+parser.add_argument("-ntry", "--ntrails", type=int, default=100)
+parser.add_argument("-time", "--timeout", type=int, default=1000)
+
 args = parser.parse_args()
 
 args.per_train = int(args.per_train) if args.per_train.isdigit() else float(args.per_train)
 args.per_val = int(args.per_val) if args.per_val.isdigit() else float(args.per_val)
 
 istraining = not args.istuning 
+
+pruner: optuna.pruners.BasePruner = (
+        optuna.pruners.MedianPruner() if args.pruning else optuna.pruners.NopPruner()
+)
 
 nchoice = args.epochs if args.epochs < 10 else (np.random.randint(args.epochs//5, args.epochs-5) if args.epochs <20 else 16)
 
@@ -260,20 +251,8 @@ class SpeakerEncoder(pl.LightningModule):
         }
 
         self.data = {
-            "metric/loss": [],
-            "metric/eer": [],
-            "metric/val_loss": [],
-            "metric/val_eer": [],
             "input/embeds": [],
-            
-            "input/proj": {
-                "vector": [],
-                "meta": "Speaker\n"
-            }
-
         }
-
-        self.meta = "labelc1\tlabelc2\tlabelc3\t\n"
 
         # Network defition
         self.lstm = nn.LSTM(
@@ -356,25 +335,34 @@ class SpeakerEncoder(pl.LightningModule):
         if (istraining) and stage=="train":
 
             if self.current_epoch in epoch_idxs: 
+                ## Mel Spectrograms
                 idx = np.random.randint(1, len(inputs))
-
                 height = int(np.sqrt(len(embeds[idx])))
                 shape = (height, -1)
+
+                cur_embeds = embeds[idx].reshape(shape).detach().numpy()
+
                 self.data["input/embeds"].append(
                     embeds[idx].reshape(shape).detach().numpy()
                 )
 
-                cur_embeds = embeds.detach()
-                cur_embeds = cur_embeds[:MAX_SPKR * args.utterances_per_speaker]
+                ## Projections
+                cur_embeds = embeds[:MAX_SPKR * args.utterances_per_speaker].detach().numpy()
 
-                self.data["input/proj"]["vector"].append(cur_embeds)
-
+                self.save_to_tsv(
+                    ["\t".join([str(i) for i in x]) for x in cur_embeds],
+                    f"{self.logger.log_dir}/vectors.tsv",
+                )
+                
                 n_speakers = len(cur_embeds ) // args.utterances_per_speaker
                 ground_truth = np.repeat(np.arange(n_speakers), args.utterances_per_speaker)
 
-                self.data["input/proj"]["meta"] += "/n".join([f"speaker{i}" for i in ground_truth])
+                self.save_to_tsv(
+                    [str(i) for i in ground_truth],
+                    f"{self.logger.log_dir}/labels.tsv",
+                )
                            
-            if self.current_epoch==0:
+            if (self.current_epoch==0) and (batch_idx==1):
                 idxs = np.random.choice(range(1, len(inputs)), 16, False)
 
                 self.logger.experiment.add_image(
@@ -407,9 +395,8 @@ class SpeakerEncoder(pl.LightningModule):
         loss = [x["loss"].detach().item() for x in outputs]
         eer = [x["eer"] for x in outputs]
 
-        if self.current_epoch in epoch_idxs: 
-            self.data["metric/loss"].append(loss)
-            self.data["metric/eer"].append(eer)
+        self.save_to_tsv("\t".join([str(i) for i in loss]), f"{self.logger.log_dir}/loss.tsv")
+        self.save_to_tsv("\t".join([str(i) for i in eer]),f"{self.logger.log_dir}/eer.tsv")
 
         loss = np.mean(loss)
         eer = np.mean(eer)
@@ -418,15 +405,15 @@ class SpeakerEncoder(pl.LightningModule):
         self.logger.experiment.add_scalar("AvgLoss/train", loss, self.current_epoch)
 
         self.metrics["eer"].append(eer)
-        self.logger.experiment.add_scalar("AvgEER/train", eer, self.current_epoch)    
+        self.logger.experiment.add_scalar("AvgEER/train", eer, self.current_epoch)   
 
     def validation_epoch_end(self, outputs):
         loss = [x["val_loss"].detach().item() for x in outputs]
         eer = [x["val_eer"] for x in outputs]
-        
-        if self.current_epoch in epoch_idxs: 
-            self.data["metric/val_loss"].append(loss)
-            self.data["metric/val_eer"].append(loss)
+
+        if not self.trainer.sanity_checking:    
+            self.save_to_tsv("\t".join([str(i) for i in loss]), f"{self.logger.log_dir}/val_loss.tsv")
+            self.save_to_tsv("\t".join([str(i) for i in eer]),f"{self.logger.log_dir}/val_eer.tsv")
 
         loss = np.mean(loss)
         eer = np.mean(eer)
@@ -437,8 +424,20 @@ class SpeakerEncoder(pl.LightningModule):
         self.metrics["val_eer"].append(eer)
         self.logger.experiment.add_scalar("AvgEER/val", eer, self.current_epoch)
 
-    def on_sanity_check_end(self):
-        self.metrics = {}
+        # return {"log": {"val/eer": eer, "val/loss": loss}}
+
+        self.logger.experiment.add_hparams(hparam_dict = {"val/eer": loss}, metric_dict = dict())
+
+    # def on_train_start(self):
+    #     self.logger.log_hyperparams_metrics(self.hparams, {"val/eer": eer, "val/loss": loss})
+    
+    @staticmethod
+    def save_to_tsv(data, fpath):      
+        with open(fpath, "a") as fh:
+            if isinstance(data, list): 
+                fh.write("\n".join(data))
+            else: fh.write(data)
+            fh.write("\n") 
 
     @staticmethod
     def metric_to_image(data, title, xlabel, ylabel):
@@ -554,7 +553,7 @@ class SpeakerEncoderCallbacks(pl.Callback):
         pl_module.logger.experiment.add_image(
             "plots/metrics/loss", 
             SpeakerEncoder.metric_to_image(
-                pl_module.data["metric/loss"], 
+                np.loadtxt(f"{pl_module.logger.log_dir}/loss.tsv", delimiter="\t"), 
                 "Training Loss by Step per Epoch",
                 "step (batch-number)",
                 "loss (GE2E loss)"
@@ -564,7 +563,7 @@ class SpeakerEncoderCallbacks(pl.Callback):
         pl_module.logger.experiment.add_image(
             "plots/metrics/eer", 
             SpeakerEncoder.metric_to_image(
-                pl_module.data["metric/eer"], 
+                np.loadtxt(f"{pl_module.logger.log_dir}/eer.tsv", delimiter="\t"),
                 "Training EER by Step per Epoch",
                 "step (batch-number)",
                 "EER (Equal Error Rate)"
@@ -574,7 +573,7 @@ class SpeakerEncoderCallbacks(pl.Callback):
         pl_module.logger.experiment.add_image(
             "plots/metrics/val_loss", 
             SpeakerEncoder.metric_to_image(
-                pl_module.data["metric/val_loss"], 
+                np.loadtxt(f"{pl_module.logger.log_dir}/val_loss.tsv", delimiter="\t"),
                 "Validation Loss by Step per Epoch",
                 "step (batch-number)",
                 "val loss (GE2E loss)"
@@ -584,7 +583,7 @@ class SpeakerEncoderCallbacks(pl.Callback):
         pl_module.logger.experiment.add_image(
             "plots/metrics/val_eer", 
             SpeakerEncoder.metric_to_image(
-                pl_module.data["metric/val_eer"], 
+                np.loadtxt(f"{pl_module.logger.log_dir}/val_eer.tsv", delimiter="\t"),
                 "Validation EER by Step per Epoch",
                 "step (batch-number)",
                 "EER (Equal Error Rate)"
@@ -601,34 +600,91 @@ class SpeakerEncoderCallbacks(pl.Callback):
             )
 
             pl_module.logger.experiment.add_embedding(
-                torch.stack(pl_module.data["input/proj"]["vector"]), 
-                metadata = pl_module.data["input/proj"]["meta"], 
-                tag = f"default"
+                np.loadtxt(f"{pl_module.logger.log_dir}/vectors.tsv", delimiter="\t"), 
+                np.loadtxt(f"{pl_module.logger.log_dir}/labels.tsv", delimiter="\t"),
+                tag = f"{args.version_name}"
             )
+
+# --------------------------------------------------------------------------------------------
+def objective(trial):
+    datamodule = SpeakerVerificationDataModule(f"{args.data_dir}/train", f"{args.data_dir}/val")
+
+    nlayers = trial.suggest_int("n_layers", 1, 4)
+    lrnrate = trial.suggest_float("learning_rate", 1e-4, 1e-1, log=True)
+    hl_size = trial.suggest_int("hidden_size", 32, 256, 32)
+    
+    model = SpeakerEncoder(hl_size, nlayers, lrnrate)   
+    model_cb = SpeakerEncoderCallbacks()   
+    prune_cb = PyTorchLightningPruningCallback(trial, monitor="val_loss")
+
+    tb_logger = pl.loggers.TensorBoardLogger(
+        "../lightning_logs", 
+        f"{args.version_name}/trail_{trial.number}",
+        default_hp_metric=False
+    )
+
+    trainer = pl.Trainer(callbacks=[model_cb],
+                        logger=tb_logger,
+                        fast_dev_run=args.fast_run, 
+                        max_epochs=args.epochs,
+                        enable_checkpointing=args.check_model,
+                        gpus=1 if torch.cuda.is_available() else None,
+                        limit_train_batches=args.per_train,
+                        limit_val_batches=args.per_val,
+                        )
+
+    hyperparameters = dict(n_layers=nlayers, hidden_size=hl_size, learning_rate=lrnrate)
+    
+    trainer.logger.log_hyperparams(hyperparameters)
+
+    trainer.fit(model, datamodule=datamodule)
+
+    # trainer.logger.log_hyperparams(hyperparameters)
+
+    return trainer.callback_metrics["val_loss"].item()
 
 
 if __name__=="__main__":
     warnings.filterwarnings("ignore")
 
-    ## -------------- TRAINING LOOP ------------------------
-    datamodule = SpeakerVerificationDataModule(f"{args.data_dir}/train", f"{args.data_dir}/val")
+    #---------------- TUNING -----------------------------
+    if not istraining:
+        
+        study = optuna.create_study(study_name=args.studyname, direction="maximize", pruner=pruner)
 
-    model = SpeakerEncoder()   
-    model_cb = SpeakerEncoderCallbacks()
+        study.optimize(objective, n_trials=args.ntrails, timeout=args.timeout)
 
-    tb_logger = pl.loggers.TensorBoardLogger("../lightning_logs", args.version_name)
+        print(f"Number of finished trials: {len(study.trials)}")
 
-    trainer = pl.Trainer(callbacks=[model_cb],
-                         logger=tb_logger,
-                         fast_dev_run=args.fast_run, 
-                         max_epochs=args.epochs,
-                         gpus=None,
-                         tpu_cores=None,
-                         limit_train_batches=args.per_train,
-                         limit_val_batches=args.per_val,
-                        )
+        print("Best trial:")
+        trial = study.best_trial
 
-    trainer.fit(model, datamodule=datamodule)
+        print(f"\tValue: {trial.value}")
 
-    print(trainer.callback_metrics)
+        print("\tParams: ")
+        for key, value in trial.params.items():
+            print(f"\t\t{key}: {value}")
+
+    # --------------- TRANING ---------------------------
+    if istraining:    
+        datamodule = SpeakerVerificationDataModule(f"{args.data_dir}/train", f"{args.data_dir}/val")
+
+        model = SpeakerEncoder()   
+        model_cb = SpeakerEncoderCallbacks()
+
+        tb_logger = pl.loggers.TensorBoardLogger("../lightning_logs", args.version_name)
+
+        trainer = pl.Trainer(callbacks=[model_cb],
+                            logger=tb_logger,
+                            fast_dev_run=args.fast_run, 
+                            max_epochs=args.epochs,
+                            enable_checkpointing=args.check_model,
+                            gpus=1 if torch.cuda.is_available() else None,
+                            limit_train_batches=args.per_train,
+                            limit_val_batches=args.per_val,
+                            )
+
+        trainer.fit(model, datamodule=datamodule)
+
+        # print(trainer.callback_metrics)
 
