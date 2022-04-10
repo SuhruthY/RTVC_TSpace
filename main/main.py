@@ -44,9 +44,24 @@ FIGSIZE = (21, 12)
 MAX_SPKR = 10
 
 SUPER = {
-    "size": 18,
-    "weight": 600,
+    "size": 21,
+    "weight":"bold"
 }
+
+TIMES21 = {
+    "size": 18,
+    "weight": "bold",
+    "style": "normal",
+    # "family": "Times New Roman"
+}
+
+ARIAL16 = {
+    "size": 16,
+    "weight": 500,
+    "style": "italic",
+    # "family": "Arial"
+}
+
 #---------------------------------------------------------
 def dir_path(path):
     if os.path.isdir(path):
@@ -57,14 +72,14 @@ def dir_path(path):
 parser = argparse.ArgumentParser()
 
 parser.add_argument("-frun", "--fast_run", "--fast", type=bool, default=False)
-parser.add_argument("-e", "--epochs", "--num_epochs", type=int, default=20)
+parser.add_argument("-e", "--epochs", type=int, default=20)
 
 parser.add_argument("-tlim", "--per_train", "--train_limit",  default="30")
 parser.add_argument("-vlim", "--per_val", "--val_limit", default="20")
 
-parser.add_argument("-v", "--version_name", "--vname", default="default")
+parser.add_argument("-v", "--version_name", default="default")
 
-parser.add_argument("-nwrkr", "--num_workers", default=os.cpu_count())
+parser.add_argument("-nwrkr", "--num_workers", type=int, default=os.cpu_count())
 
 parser.add_argument("-tune", "--istuning", action="store_true")
 parser.add_argument("-check", "--check_model", action="store_true")
@@ -74,12 +89,14 @@ parser.add_argument("-lrate", "--learning_rate", default=1e-4)
 parser.add_argument("-nlayers", "--num_layers", default=3)
 parser.add_argument("-hlsize", "--hidden_layer_size", type=int, default=256)
 
-parser.add_argument("-spkr", "--speaker_per_batch", "--spkr_per_batch", type=int,default=8) # should be 64
-parser.add_argument("-nutter", "--utterances_per_speaker", "--utter_per_spkr", type=int, default=5) # should be 10
+parser.add_argument("-spkr", "--speaker_per_batch", type=int,default=8) # should be 64
+parser.add_argument("-nutter", "--utterances_per_speaker", type=int, default=5) # should be 10
 
-parser.add_argument("-dir", "--data_dir", "--directory",  type=dir_path, default="../data/audio")
+parser.add_argument("-dir", "--data_dir",  type=dir_path, default="../data/audio")
 
-parser.add_argument("-s", "--studyname", "--study", default="default")
+parser.add_argument( "-s", "--studyname", "--study", default="default", 
+help="Use a spectific convetnion such that it remains unique => eg: hparams_study_v0")
+
 parser.add_argument("-ntry", "--ntrails", type=int, default=100)
 parser.add_argument("-time", "--timeout", type=int, default=1000)
 
@@ -89,6 +106,8 @@ args.per_train = int(args.per_train) if args.per_train.isdigit() else float(args
 args.per_val = int(args.per_val) if args.per_val.isdigit() else float(args.per_val)
 
 istraining = not args.istuning 
+
+if args.istuning: args.version_name = "tuning"
 
 pruner: optuna.pruners.BasePruner = (
         optuna.pruners.MedianPruner() if args.pruning else optuna.pruners.NopPruner()
@@ -101,6 +120,123 @@ nplot = (int(np.ceil(nplot[0])), int(np.ceil(nplot[1])))
 
 epoch_idxs = list(range(args.epochs)) if args.epochs<10 else np.random.choice(list(range(1, args.epochs)), nchoice, False)
 #---------------------------------------------------------------
+def save_to_tsv(data, fpath):      
+    with open(fpath, "a") as fh:
+        if isinstance(data, list): 
+            fh.write("\n".join(data))
+        else: fh.write(data)
+        fh.write("\n") 
+
+def metric_to_image(data, title, xlabel, ylabel):
+    fig, ax = plt.subplots(nplot[0], nplot[1], figsize=FIGSIZE)
+    fig.add_subplot(111, frameon=False)
+    fig.suptitle(title, size=SUPER["size"], weight=SUPER["weight"])
+    count = 0
+    for m, n in [(i, j) for i in range(nplot[0]) for j in  range(nplot[1])]:
+
+        if (nplot[0] != 1) and (nplot[1] != 1): cur_ax = ax[m, n]
+        else: cur_ax = ax[count]
+
+        try:
+            y = data[count]
+            cur_ax.plot(y)
+
+            if m+1 != nplot[0]: cur_ax.set_xticks([])
+        except: 
+            cur_ax.set_xticks([])
+            
+        cur_ax.set_yticks([])
+            
+        count += 1
+
+    add_labels(xlabel, ylabel)
+    return figure_to_image()
+
+def input_to_image(data, title, xlabel, ylabel, rows=4, cols=4):
+    fig, ax = plt.subplots(rows, cols, figsize=FIGSIZE)
+    fig.add_subplot(111, frameon=False)
+    fig.suptitle(title, size=SUPER["size"], weight=SUPER["weight"])
+    count = 0
+    for m,n in [(i, j) for i in range(rows) for j in  range(cols)]:
+        img = librosa.display.specshow(
+            librosa.power_to_db(data[count].T, ref=np.max), 
+            fmax=8000, ax=ax[m, n], y_axis="mel", x_axis="time"
+        )
+
+        if m+1 != rows: ax[m, n].set_xticks([])
+        if n!=0: ax[m, n].set_yticks([])
+
+        ax[m, n].set_xlabel("")
+        ax[m, n].set_ylabel("")
+
+        count += 1
+
+    add_labels(xlabel, ylabel)
+    return figure_to_image()
+
+def fit_to_image(data, title, xlabel):
+    order = [(0, 0), (0, 1), (1, 0), (1, 1)]
+
+    fig , ax = plt.subplots(2, 2, figsize=FIGSIZE)
+    fig.add_subplot(111, frameon=False)
+    fig.suptitle(title, size=SUPER["size"], weight=SUPER["weight"])
+
+    for (m, n), (key, val) in zip(order, data):
+        ax[m, n].plot(val)
+        ax[m, n].set_title(key, fontdict=TIMES21)
+
+        if m==0:
+            ax[m, n].set_xticks([]) 
+
+        ax[m, n].set_yticks([]) 
+    
+    add_labels(xlabel)
+    return figure_to_image()
+
+def embeds_to_image(data, title):
+    plt.clf()
+
+    fig, ax = plt.subplots(nplot[0], nplot[1], figsize=(nplot[0]*4, nplot[1]*4))
+    fig.add_subplot(111, frameon=False)
+    fig.suptitle(title, size=SUPER["size"], weight=SUPER["weight"])
+    count = 0
+    for m, n in [(i, j) for i in range(nplot[0]) for j in  range(nplot[1])]:
+
+        if (nplot[0] != 1) and (nplot[1] != 1): cur_ax = ax[m, n]
+        else: cur_ax = ax[count]
+
+        try:
+            cmap = cm.get_cmap()
+            cur_ax.imshow(data[count], cmap=cmap)
+        except: pass
+
+        cur_ax.set_xticks([])    
+        cur_ax.set_yticks([])
+
+        count += 1
+
+    plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
+    return figure_to_image()
+
+def add_labels(xlabel=None, ylabel=None, fontdict=ARIAL16, padx=5, pady=2):        
+    plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
+    plt.grid(False)
+
+    plt.xlabel(xlabel, labelpad=padx, fontdict=fontdict)
+    plt.ylabel(ylabel, labelpad=pady, fontdict=fontdict)
+
+    plt.tight_layout()
+
+def figure_to_image():
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+
+    image = PIL.Image.open(buf)
+    image = np.array(image)[...,:3]
+    image = ToTensor()(image).unsqueeze(0)
+    return image
+#-------------------------------------------------------------------------
 class RandomCycler:
     def __init__(self, source):
         self.all_items = list(source)
@@ -251,6 +387,10 @@ class SpeakerEncoder(pl.LightningModule):
         }
 
         self.data = {
+            "metric/loss": [],
+            "metric/eer": [],
+            "metric/val_loss": [],
+            "metric/val_eer": [],
             "input/embeds": [],
         }
 
@@ -349,7 +489,7 @@ class SpeakerEncoder(pl.LightningModule):
                 ## Projections
                 cur_embeds = embeds[:MAX_SPKR * args.utterances_per_speaker].detach().numpy()
 
-                self.save_to_tsv(
+                save_to_tsv(
                     ["\t".join([str(i) for i in x]) for x in cur_embeds],
                     f"{self.logger.log_dir}/vectors.tsv",
                 )
@@ -357,7 +497,7 @@ class SpeakerEncoder(pl.LightningModule):
                 n_speakers = len(cur_embeds ) // args.utterances_per_speaker
                 ground_truth = np.repeat(np.arange(n_speakers), args.utterances_per_speaker)
 
-                self.save_to_tsv(
+                save_to_tsv(
                     [str(i) for i in ground_truth],
                     f"{self.logger.log_dir}/labels.tsv",
                 )
@@ -367,8 +507,8 @@ class SpeakerEncoder(pl.LightningModule):
 
                 self.logger.experiment.add_image(
                     "plots/inputs/mel_specs",
-                    SpeakerEncoder.input_to_image(inputs[idxs],
-                        "random Melody-Spectrogram pool",
+                    input_to_image(inputs[idxs],
+                        "Random Melody-Spectrogram Pool",
                         "Time", "Mels"
                     ), 0, dataformats='NCHW'
                 )
@@ -395,8 +535,9 @@ class SpeakerEncoder(pl.LightningModule):
         loss = [x["loss"].detach().item() for x in outputs]
         eer = [x["eer"] for x in outputs]
 
-        self.save_to_tsv("\t".join([str(i) for i in loss]), f"{self.logger.log_dir}/loss.tsv")
-        self.save_to_tsv("\t".join([str(i) for i in eer]),f"{self.logger.log_dir}/eer.tsv")
+        if istraining and (self.current_epoch in epoch_idxs):
+            self.data["metric/loss"].append(loss)
+            self.data["metric/eer"].append(eer)
 
         loss = np.mean(loss)
         eer = np.mean(eer)
@@ -411,9 +552,9 @@ class SpeakerEncoder(pl.LightningModule):
         loss = [x["val_loss"].detach().item() for x in outputs]
         eer = [x["val_eer"] for x in outputs]
 
-        if not self.trainer.sanity_checking:    
-            self.save_to_tsv("\t".join([str(i) for i in loss]), f"{self.logger.log_dir}/val_loss.tsv")
-            self.save_to_tsv("\t".join([str(i) for i in eer]),f"{self.logger.log_dir}/val_eer.tsv")
+        if (not self.trainer.sanity_checking) and istraining and (self.current_epoch in epoch_idxs):
+            self.data["metric/val_loss"].append(loss)
+            self.data["metric/val_eer"].append(eer)
 
         loss = np.mean(loss)
         eer = np.mean(eer)
@@ -423,118 +564,7 @@ class SpeakerEncoder(pl.LightningModule):
 
         self.metrics["val_eer"].append(eer)
         self.logger.experiment.add_scalar("AvgEER/val", eer, self.current_epoch)
-
-        # return {"log": {"val/eer": eer, "val/loss": loss}}
-
-        self.logger.experiment.add_hparams(hparam_dict = {"val/eer": loss}, metric_dict = dict())
-
-    # def on_train_start(self):
-    #     self.logger.log_hyperparams_metrics(self.hparams, {"val/eer": eer, "val/loss": loss})
-    
-    @staticmethod
-    def save_to_tsv(data, fpath):      
-        with open(fpath, "a") as fh:
-            if isinstance(data, list): 
-                fh.write("\n".join(data))
-            else: fh.write(data)
-            fh.write("\n") 
-
-    @staticmethod
-    def metric_to_image(data, title, xlabel, ylabel):
-        fig, ax = plt.subplots(nplot[0], nplot[1], figsize=FIGSIZE)
-        fig.add_subplot(111, frameon=False)
-        fig.suptitle(title, size=SUPER["size"], weight=SUPER["weight"])
-        count = 0
-        for m, n in [(i, j) for i in range(nplot[0]) for j in  range(nplot[1])]:
-
-            if (nplot[0] != 1) and (nplot[1] != 1): cur_ax = ax[m, n]
-            else: cur_ax = ax[count]
-
-            try:
-                y = data[count]
-                cur_ax.plot(y)
-
-                if m+1 != nplot[0]: cur_ax.set_xticks([])
-            except: 
-                cur_ax.set_xticks([])
-                
-            cur_ax.set_yticks([])
-                
-            count += 1
-
-        SpeakerEncoder.add_labels(xlabel, ylabel)
-        return SpeakerEncoder.figure_to_image()
-    
-    @staticmethod
-    def input_to_image(data, title, xlabel, ylabel, rows=4, cols=4):
-        fig, ax = plt.subplots(rows, cols, figsize=FIGSIZE)
-        fig.add_subplot(111, frameon=False)
-        fig.suptitle(title, size=SUPER["size"], weight=SUPER["weight"])
-        count = 0
-        for m,n in [(i, j) for i in range(rows) for j in  range(cols)]:
-            img = librosa.display.specshow(
-                librosa.power_to_db(data[count].T, ref=np.max), 
-                fmax=8000, ax=ax[m, n], y_axis="mel", x_axis="time"
-            )
-
-            if m+1 != rows: ax[m, n].set_xticks([])
-            if n!=0: ax[m, n].set_yticks([])
-
-            ax[m, n].set_xlabel("")
-            ax[m, n].set_ylabel("")
-
-            count += 1
-
-        SpeakerEncoder.add_labels(xlabel, ylabel)
-        return SpeakerEncoder.figure_to_image()
-
-    @staticmethod
-    def embeds_to_image(data, title):
-        plt.clf()
-
-        fig, ax = plt.subplots(nplot[0], nplot[1], figsize=(nplot[0]*4, nplot[1]*4))
-        fig.add_subplot(111, frameon=False)
-        fig.suptitle(title, size=SUPER["size"], weight=SUPER["weight"])
-        count = 0
-        for m, n in [(i, j) for i in range(nplot[0]) for j in  range(nplot[1])]:
-
-            if (nplot[0] != 1) and (nplot[1] != 1): cur_ax = ax[m, n]
-            else: cur_ax = ax[count]
-
-            try:
-                cmap = cm.get_cmap()
-                cur_ax.imshow(data[count], cmap=cmap)
-            except: pass
-
-            cur_ax.set_xticks([])    
-            cur_ax.set_yticks([])
-
-            count += 1
-
-        plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
-        return SpeakerEncoder.figure_to_image()
-
-    @staticmethod
-    def add_labels(xlabel=None, ylabel=None, label_size=14, padx=5, pady=2):        
-        plt.tick_params(labelcolor='none', top=False, bottom=False, left=False, right=False)
-        plt.grid(False)
-
-        plt.xlabel(xlabel, labelpad=padx, size=label_size)
-        plt.ylabel(ylabel, labelpad=pady, size=label_size)
-
-        plt.tight_layout()
-
-    @staticmethod
-    def figure_to_image():
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        buf.seek(0)
-
-        image = PIL.Image.open(buf)
-        image = np.array(image)[...,:3]
-        image = ToTensor()(image).unsqueeze(0)
-        return image
-
+ 
 class SpeakerEncoderCallbacks(pl.Callback):
     def on_batch_end(self, trainer, pl_module):
         # Gradient scale
@@ -550,50 +580,63 @@ class SpeakerEncoderCallbacks(pl.Callback):
         trainer.callback_metrics["eer"] = np.mean(pl_module.metrics["eer"])
         trainer.callback_metrics["val_eer"] = np.mean(pl_module.metrics["val_eer"]) 
 
-        pl_module.logger.experiment.add_image(
-            "plots/metrics/loss", 
-            SpeakerEncoder.metric_to_image(
-                np.loadtxt(f"{pl_module.logger.log_dir}/loss.tsv", delimiter="\t"), 
-                "Training Loss by Step per Epoch",
-                "step (batch-number)",
-                "loss (GE2E loss)"
-            ), 0, dataformats='NCHW'
-        )
+        if not istraining:
+            self.logger.log_hyperparams(self.hparams, metrics={
+                "hp_metric": trainer.callback_metrics["val_eer"]
+            })
 
-        pl_module.logger.experiment.add_image(
-            "plots/metrics/eer", 
-            SpeakerEncoder.metric_to_image(
-                np.loadtxt(f"{pl_module.logger.log_dir}/eer.tsv", delimiter="\t"),
-                "Training EER by Step per Epoch",
-                "step (batch-number)",
-                "EER (Equal Error Rate)"
-            ), 0, dataformats='NCHW'
-        )
+        if istraining:      
+            pl_module.logger.experiment.add_image(
+                "plots/metrics/all", 
+                fit_to_image(
+                    pl_module.metrics.items(), 
+                    "Visualizing all Metrics per Epoch",
+                    "epoch (iteration)",
+                ), 0, dataformats='NCHW'
+            )   
 
-        pl_module.logger.experiment.add_image(
-            "plots/metrics/val_loss", 
-            SpeakerEncoder.metric_to_image(
-                np.loadtxt(f"{pl_module.logger.log_dir}/val_loss.tsv", delimiter="\t"),
-                "Validation Loss by Step per Epoch",
-                "step (batch-number)",
-                "val loss (GE2E loss)"
-            ), 0, dataformats='NCHW'
-        )
+            pl_module.logger.experiment.add_image(
+                "plots/metrics/loss", 
+                metric_to_image(
+                    pl_module.data["metric/loss"], 
+                    "Training Loss by Step per Epoch",
+                    "step (batch-number)",
+                    "loss (GE2E loss)"
+                ), 0, dataformats='NCHW'
+            )
 
-        pl_module.logger.experiment.add_image(
-            "plots/metrics/val_eer", 
-            SpeakerEncoder.metric_to_image(
-                np.loadtxt(f"{pl_module.logger.log_dir}/val_eer.tsv", delimiter="\t"),
-                "Validation EER by Step per Epoch",
-                "step (batch-number)",
-                "EER (Equal Error Rate)"
-            ), 0, dataformats='NCHW'
-        )
+            pl_module.logger.experiment.add_image(
+                "plots/metrics/eer", 
+                metric_to_image(
+                    pl_module.data["metric/eer"],
+                    "Training EER by Step per Epoch",
+                    "step (batch-number)",
+                    "EER (Equal Error Rate)"
+                ), 0, dataformats='NCHW'
+            )
 
-        if istraining:
+            pl_module.logger.experiment.add_image(
+                "plots/metrics/val_loss", 
+                metric_to_image(
+                    pl_module.data["metric/val_loss"],
+                    "Validation Loss by Step per Epoch",
+                    "step (batch-number)",
+                    "val loss (GE2E loss)"
+                ), 0, dataformats='NCHW'
+            )
+
+            pl_module.logger.experiment.add_image(
+                "plots/metrics/val_eer", 
+                metric_to_image(
+                    pl_module.data["metric/val_eer"],
+                    "Validation EER by Step per Epoch",
+                    "step (batch-number)",
+                    "EER (Equal Error Rate)"
+                ), 0, dataformats='NCHW'
+            )
             pl_module.logger.experiment.add_image(
                 "plots/input/embeds", 
-                SpeakerEncoder.embeds_to_image(
+                embeds_to_image(
                     pl_module.data["input/embeds"], 
                     "random Embeddings pool",
                 ), 0, dataformats='NCHW'
@@ -615,12 +658,12 @@ def objective(trial):
     
     model = SpeakerEncoder(hl_size, nlayers, lrnrate)   
     model_cb = SpeakerEncoderCallbacks()   
-    prune_cb = PyTorchLightningPruningCallback(trial, monitor="val_loss")
+    prune_cb = PyTorchLightningPruningCallback(trial, monitor="val_loss")  
 
     tb_logger = pl.loggers.TensorBoardLogger(
-        "../lightning_logs", 
-        f"{args.version_name}/trail_{trial.number}",
-        default_hp_metric=False
+        f"../lightning_logs/{args.version_name}", 
+        f"{args.studyname}", 
+        f"trail_{trial.number}"
     )
 
     trainer = pl.Trainer(callbacks=[model_cb],
@@ -634,12 +677,10 @@ def objective(trial):
                         )
 
     hyperparameters = dict(n_layers=nlayers, hidden_size=hl_size, learning_rate=lrnrate)
-    
+  
     trainer.logger.log_hyperparams(hyperparameters)
 
     trainer.fit(model, datamodule=datamodule)
-
-    # trainer.logger.log_hyperparams(hyperparameters)
 
     return trainer.callback_metrics["val_loss"].item()
 
@@ -667,7 +708,10 @@ if __name__=="__main__":
 
     # --------------- TRANING ---------------------------
     if istraining:    
-        datamodule = SpeakerVerificationDataModule(f"{args.data_dir}/train", f"{args.data_dir}/val")
+        datamodule = SpeakerVerificationDataModule(
+            f"{args.data_dir}/train",
+            f"{args.data_dir}/val"
+        )
 
         model = SpeakerEncoder()   
         model_cb = SpeakerEncoderCallbacks()
