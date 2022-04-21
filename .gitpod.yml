@@ -1,5 +1,5 @@
 tasks:
 - name: Install Libraries
-  command: pip install -r requirements.txt
-- name: Install soundfile 
-  command: sudo apt install -y libsndfile1
+  init: 
+    pip install -r requirements.txt
+    sudo apt install -y libsndfile1
