@@ -1,5 +1,5 @@
 tasks:
 - name: Install Libraries
-  init: 
+  init: |
     pip install -r requirements.txt
     sudo apt install -y libsndfile1
